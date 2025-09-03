@@ -188,11 +188,25 @@ class WebSocketManager:
         """Handle new alert from drone"""
         try:
             # Store the original alert data as-is with minimal required fields
-            alert_data.update({
-                'response': 0,
-                'image_received': 0,
-                'status': 'pending'
-            })
+            type = "alert"
+            if alert_data['rl_responsed'] == 1:
+                if alert_data['image_received'] == 1:
+                    alert_data.update({
+                        'response': 1,
+                        'status': 'validated',
+                    })
+                else:
+                    alert_data.update({
+                        'response': 1,
+                        'status': 'responded',
+                    })
+                type = "alert_responsed"
+            else:
+                alert_data.update({
+                    'response': 0,
+                    'status': 'pending',
+                })
+                type = "alert"
             
             # Insert alert into database
             alert_id = await db_manager.insert_alert(alert_data)
@@ -202,7 +216,7 @@ class WebSocketManager:
             
             # Broadcast the alert with original schema, just add alert_id once outside
             broadcast_message = {
-                "type": "alert",
+                "type": type,
                 "alert_id": str(alert_id),
                 "data": serialize_datetime(alert_data.copy()),
                 "timestamp": datetime.utcnow().isoformat()
