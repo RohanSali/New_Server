@@ -215,73 +215,6 @@ class WebSocketManager:
             logger.error(f"Error handling alert from drone {drone_id}: {e}")
             logger.error(f"Alert data: {alert_data}")
     
-    async def handle_response_from_application(self, alert_id: str, response_data: Dict[str, Any]):
-        """Handle response from application (RL model output)"""
-        try:
-            # Update alert in database
-            update_data = {
-                'response': 1,
-                'actions': response_data.get('actions', []),
-                'status': 'responded'
-            }
-            
-            success = await db_manager.update_alert(alert_id, update_data)
-            
-            if success:
-                # Find the drone that sent this alert
-                drone_id = None
-                for d_id, a_id in self.drone_alerts.items():
-                    if a_id == alert_id:
-                        drone_id = d_id
-                        break
-                
-                if drone_id:
-                    # Send command to drone
-                    command_message = {
-                        "type": "drone_command",
-                        "alert_id": alert_id,
-                        "actions": response_data.get('actions', []),
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    await self.send_to_drone(drone_id, command_message)
-                    
-                    logger.info(f"Command sent to drone {drone_id} for alert {alert_id}")
-                else:
-                    logger.warning(f"No drone found for alert {alert_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling response from application for alert {alert_id}: {e}")
-    
-    async def handle_image_from_drone(self, drone_id: str, image_data: Dict[str, Any]):
-        """Handle image data from drone"""
-        try:
-            alert_id = image_data.get('alert_id')
-            image_url = image_data.get('image_url')
-            
-            if alert_id and image_url:
-                # Update alert in database
-                update_data = {
-                    'image_received': 1,
-                    'image_url': image_url,
-                    'status': 'completed'
-                }
-                
-                success = await db_manager.update_alert(alert_id, update_data)
-                
-                if success:
-                    # Broadcast to applications
-                    broadcast_message = {
-                        "type": "image_received",
-                        "alert_id": alert_id,
-                        "image_url": image_url,
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    await self.broadcast_to_applications(broadcast_message)
-                    
-                    logger.info(f"Image received for alert {alert_id} from drone {drone_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling image from drone {drone_id}: {e}")
 
     async def handle_alert_image_from_drone(self, drone_id: str, alert_image_data: Dict[str, Any]):
         """Handle alert image data from drone"""
@@ -353,92 +286,6 @@ class WebSocketManager:
             logger.error(f"Error handling alert image from application {app_id}: {e}")
             logger.error(f"Alert image data: {alert_image_data}")
 
-    async def handle_processing_task_from_application(self, app_id: str, task_data: Dict[str, Any]):
-        """Handle processing task from application"""
-        try:
-            # Create processing task in database
-            task_id = await db_manager.create_processing_task(task_data)
-            
-            # Find the target drone
-            drone_id = task_data.get('drone_id')
-            if drone_id and drone_id in self.drone_connections:
-                # Send task to drone
-                task_message = {
-                    "type": "processing_task",
-                    "task_id": task_id,
-                    "task_data": serialize_datetime(task_data),
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                await self.send_to_drone(drone_id, task_message)
-                
-                logger.info(f"Processing task {task_id} sent to drone {drone_id}")
-            else:
-                logger.warning(f"Drone {drone_id} not connected or not found")
-            
-        except Exception as e:
-            logger.error(f"Error handling processing task from application {app_id}: {e}")
-            logger.error(f"Task data: {task_data}")
-
-    async def handle_processing_result_from_drone(self, drone_id: str, result_data: Dict[str, Any]):
-        """Handle processing result from drone"""
-        try:
-            task_id = result_data.get('task_id')
-            
-            # Create processing result in database
-            result_id = await db_manager.create_processing_result(result_data)
-            
-            # Update task status to completed
-            await db_manager.update_task_status(task_id, 'completed')
-            
-            # Find the application that created the task
-            task = await db_manager.get_processing_task(task_id)
-            app_id = task.get('app_id') if task else None
-            
-            # Broadcast result to applications
-            broadcast_message = {
-                "type": "processing_result_received",
-                "result_id": result_id,
-                "task_id": task_id,
-                "result_data": serialize_datetime(result_data),
-                "drone_id": drone_id,
-                "app_id": app_id,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            await self.broadcast_to_applications(broadcast_message)
-            
-            logger.info(f"Processing result {result_id} for task {task_id} from drone {drone_id} processed and broadcasted")
-            
-        except Exception as e:
-            logger.error(f"Error handling processing result from drone {drone_id}: {e}")
-            logger.error(f"Result data: {result_data}")
-
-    async def handle_task_status_update_from_drone(self, drone_id: str, status_data: Dict[str, Any]):
-        """Handle task status update from drone"""
-        try:
-            task_id = status_data.get('task_id')
-            status = status_data.get('status')
-            additional_data = status_data.get('additional_data', {})
-            
-            # Update task status in database
-            success = await db_manager.update_task_status(task_id, status, additional_data)
-            
-            if success:
-                # Broadcast status update to applications
-                broadcast_message = {
-                    "type": "task_status_update",
-                    "task_id": task_id,
-                    "status": status,
-                    "drone_id": drone_id,
-                    "additional_data": additional_data,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                await self.broadcast_to_applications(broadcast_message)
-                
-                logger.info(f"Task {task_id} status updated to {status} by drone {drone_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling task status update from drone {drone_id}: {e}")
-            logger.error(f"Status data: {status_data}")
     
     async def handle_websocket_message(self, client_id: str, message_data: Dict[str, Any]):
         """Handle incoming WebSocket message"""
@@ -461,20 +308,6 @@ class WebSocketManager:
                 else:
                     logger.warning(f"Applications cannot send alerts")
             
-            elif message_type == 'response':
-                if client_type == 'application':
-                    alert_id = message_data.get('alert_id')
-                    if alert_id:
-                        await self.handle_response_from_application(alert_id, message_data.get('data', {}))
-                else:
-                    logger.warning(f"Drones cannot send responses")
-            
-            elif message_type == 'image':
-                if client_type == 'drone':
-                    await self.handle_image_from_drone(client_id, message_data.get('data', {}))
-                else:
-                    logger.warning(f"Applications cannot send images")
-            
             elif message_type == 'alert_image':
                 if client_type == 'drone':
                     await self.handle_alert_image_from_drone(client_id, message_data.get('data', {}))
@@ -482,24 +315,6 @@ class WebSocketManager:
                     await self.handle_alert_image_from_application(client_id, message_data.get('data', {}))
                 else:
                     logger.warning(f"Invalid client type for alert_image message")
-            
-            elif message_type == 'processing_task':
-                if client_type == 'application':
-                    await self.handle_processing_task_from_application(client_id, message_data.get('data', {}))
-                else:
-                    logger.warning(f"Drones cannot send processing tasks")
-            
-            elif message_type == 'processing_result':
-                if client_type == 'drone':
-                    await self.handle_processing_result_from_drone(client_id, message_data.get('data', {}))
-                else:
-                    logger.warning(f"Applications cannot send processing results")
-            
-            elif message_type == 'task_status_update':
-                if client_type == 'drone':
-                    await self.handle_task_status_update_from_drone(client_id, message_data.get('data', {}))
-                else:
-                    logger.warning(f"Applications cannot send task status updates")
             
             elif message_type == 'ping':
                 # Respond to ping
