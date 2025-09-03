@@ -339,15 +339,15 @@ class WebSocketManager:
             # Store alert image in database as-is
             alert_image_id = await db_manager.create_alert_image(alert_image_data)
             
-            # Broadcast to applications with original schema - no modifications
+            # Broadcast to ALL DRONES with original schema - no modifications
             broadcast_message = {
                 "type": "alert_image",
                 "data": serialize_datetime(alert_image_data.copy()),
                 "timestamp": datetime.utcnow().isoformat()
             }
-            await self.broadcast_to_applications(broadcast_message)
+            await self.broadcast_to_drones(broadcast_message)
             
-            logger.info(f"Alert image {alert_image_id} from application {app_id} stored and broadcasted")
+            logger.info(f"Alert image {alert_image_id} from application {app_id} stored and broadcasted to all drones")
             
         except Exception as e:
             logger.error(f"Error handling alert image from application {app_id}: {e}")
@@ -444,7 +444,12 @@ class WebSocketManager:
         """Handle incoming WebSocket message"""
         try:
             message_type = message_data.get('type')
-            client_type = self.connection_info.get(client_id, {}).client_type
+            connection_info = self.connection_info.get(client_id)
+            client_type = connection_info.client_type if connection_info else None
+            
+            if not client_type:
+                logger.error(f"No client type found for {client_id}")
+                return
             
             logger.info(f"Handling message from {client_id} (type: {client_type}): {message_type}")
             logger.info(f"Message data: {json.dumps(message_data, indent=2)}")
