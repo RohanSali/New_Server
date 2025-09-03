@@ -14,6 +14,7 @@ from config import Config
 from database import db_manager
 from websocket_manager import websocket_manager
 from models import AlertCreate, AlertResponse, AlertImageUpdate, AlertImageCreate, ProcessingTaskCreate
+from client_registry import client_registry, get_registry_stats
 
 # Configure logging
 logging.basicConfig(
@@ -476,6 +477,162 @@ async def get_results_by_drone(drone_id: str, limit: int = 50):
         return {"results": results, "count": len(results), "drone_id": drone_id}
     except Exception as e:
         logger.error(f"Error getting results by drone {drone_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Client Registry Management Endpoints
+@app.get("/api/clients")
+async def get_all_clients():
+    """Get all registered clients"""
+    try:
+        clients = {}
+        for client_id, client_info in client_registry.clients.items():
+            clients[client_id] = {
+                "client_id": client_info.client_id,
+                "client_type": client_info.client_type,
+                "name": client_info.name,
+                "description": client_info.description,
+                "capabilities": client_info.capabilities,
+                "location": client_info.location,
+                "status": client_info.status,
+                "first_connected": client_info.first_connected,
+                "last_connected": client_info.last_connected,
+                "total_connections": client_info.total_connections,
+                "is_authorized": client_info.is_authorized,
+                "metadata": client_info.metadata
+            }
+        return {"clients": clients, "count": len(clients)}
+    except Exception as e:
+        logger.error(f"Error getting clients: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/clients/{client_id}")
+async def get_client_info(client_id: str):
+    """Get information about a specific client"""
+    try:
+        client_info = client_registry.get_client(client_id)
+        if not client_info:
+            raise HTTPException(status_code=404, detail="Client not found")
+        
+        return {
+            "client_id": client_info.client_id,
+            "client_type": client_info.client_type,
+            "name": client_info.name,
+            "description": client_info.description,
+            "capabilities": client_info.capabilities,
+            "location": client_info.location,
+            "status": client_info.status,
+            "first_connected": client_info.first_connected,
+            "last_connected": client_info.last_connected,
+            "total_connections": client_info.total_connections,
+            "is_authorized": client_info.is_authorized,
+            "metadata": client_info.metadata
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting client {client_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/clients/type/{client_type}")
+async def get_clients_by_type(client_type: str):
+    """Get all clients of a specific type (drone or application)"""
+    try:
+        if client_type not in ["drone", "application"]:
+            raise HTTPException(status_code=400, detail="Invalid client type. Must be 'drone' or 'application'")
+        
+        clients = client_registry.get_clients_by_type(client_type)
+        client_data = []
+        
+        for client_info in clients:
+            client_data.append({
+                "client_id": client_info.client_id,
+                "client_type": client_info.client_type,
+                "name": client_info.name,
+                "description": client_info.description,
+                "capabilities": client_info.capabilities,
+                "location": client_info.location,
+                "status": client_info.status,
+                "first_connected": client_info.first_connected,
+                "last_connected": client_info.last_connected,
+                "total_connections": client_info.total_connections,
+                "is_authorized": client_info.is_authorized,
+                "metadata": client_info.metadata
+            })
+        
+        return {"clients": client_data, "count": len(client_data), "client_type": client_type}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting clients by type {client_type}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/clients/online")
+async def get_online_clients():
+    """Get all currently online clients"""
+    try:
+        online_clients = client_registry.get_online_clients()
+        client_data = {}
+        
+        for client_id, client_info in online_clients.items():
+            client_data[client_id] = {
+                "client_id": client_info.client_id,
+                "client_type": client_info.client_type,
+                "name": client_info.name,
+                "description": client_info.description,
+                "capabilities": client_info.capabilities,
+                "location": client_info.location,
+                "status": client_info.status,
+                "first_connected": client_info.first_connected,
+                "last_connected": client_info.last_connected,
+                "total_connections": client_info.total_connections,
+                "is_authorized": client_info.is_authorized,
+                "metadata": client_info.metadata
+            }
+        
+        return {"clients": client_data, "count": len(client_data)}
+    except Exception as e:
+        logger.error(f"Error getting online clients: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.put("/api/clients/{client_id}/authorize")
+async def authorize_client(client_id: str, authorized: bool = True):
+    """Authorize or deauthorize a client"""
+    try:
+        client_info = client_registry.get_client(client_id)
+        if not client_info:
+            raise HTTPException(status_code=404, detail="Client not found")
+        
+        client_registry.authorize_client(client_id, authorized)
+        status = "authorized" if authorized else "deauthorized"
+        return {"message": f"Client {client_id} has been {status}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error authorizing client {client_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/api/clients/{client_id}")
+async def remove_client(client_id: str):
+    """Remove a client from the registry"""
+    try:
+        if client_registry.remove_client(client_id):
+            return {"message": f"Client {client_id} has been removed from registry"}
+        else:
+            raise HTTPException(status_code=404, detail="Client not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing client {client_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/registry/stats")
+async def get_client_registry_stats():
+    """Get client registry statistics"""
+    try:
+        stats = get_registry_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting registry stats: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from datetime import datetime
 import uuid
 from models import WebSocketMessage, ConnectionInfo, DroneCommand
 from database import db_manager
+from client_registry import client_registry, is_client_authorized
 
 def serialize_datetime(obj):
     """Recursively serialize datetime, ObjectId, and other MongoDB objects in dictionaries"""
@@ -49,6 +50,16 @@ class WebSocketManager:
         if not client_id:
             client_id = str(uuid.uuid4())
         
+        # Check if client is authorized (if it exists in registry)
+        if not is_client_authorized(client_id):
+            await websocket.close(code=1008, reason="Client not authorized")
+            logger.warning(f"Unauthorized connection attempt: {client_id}")
+            return None
+        
+        # Register client in registry (auto-registration)
+        client_info = client_registry.register_client(client_id, client_type)
+        logger.info(f"Client registered/updated in registry: {client_id} ({client_info.name})")
+        
         # Store connection based on client type
         if client_type == "drone":
             self.drone_connections[client_id] = websocket
@@ -67,11 +78,14 @@ class WebSocketManager:
         
         logger.info(f"New {client_type} connection: {client_id}")
         
-        # Send welcome message
+        # Send welcome message with client info
         welcome_message = {
             "type": "connection_established",
             "client_id": client_id,
             "client_type": client_type,
+            "client_name": client_info.name,
+            "capabilities": client_info.capabilities,
+            "total_connections": client_info.total_connections,
             "timestamp": datetime.utcnow().isoformat()
         }
         await self.send_personal_message(client_id, welcome_message)
@@ -81,6 +95,9 @@ class WebSocketManager:
     async def disconnect(self, client_id: str):
         """Handle WebSocket disconnection"""
         try:
+            # Update client registry status
+            client_registry.unregister_client(client_id)
+            
             # Remove from appropriate connection pool
             if client_id in self.drone_connections:
                 del self.drone_connections[client_id]
@@ -140,6 +157,26 @@ class WebSocketManager:
         for client_id in disconnected_clients:
             await self.disconnect(client_id)
     
+    async def broadcast_to_drones(self, message: Dict[str, Any]):
+        """Broadcast message to all connected drones"""
+        if not self.drone_connections:
+            return
+        
+        disconnected_clients = []
+        
+        for client_id, websocket in self.drone_connections.items():
+            try:
+                # Serialize datetime objects before sending
+                serialized_message = serialize_datetime(message)
+                await websocket.send_text(json.dumps(serialized_message))
+            except Exception as e:
+                logger.error(f"Error broadcasting to drone {client_id}: {e}")
+                disconnected_clients.append(client_id)
+        
+        # Clean up disconnected clients
+        for client_id in disconnected_clients:
+            await self.disconnect(client_id)
+    
     async def send_to_drone(self, drone_id: str, message: Dict[str, Any]):
         """Send message to a specific drone"""
         if drone_id in self.drone_connections:
@@ -150,7 +187,7 @@ class WebSocketManager:
     async def handle_alert_from_drone(self, drone_id: str, alert_data: Dict[str, Any]):
         """Handle new alert from drone"""
         try:
-            # Set initial values
+            # Store the original alert data as-is with minimal required fields
             alert_data.update({
                 'response': 0,
                 'image_received': 0,
@@ -163,24 +200,16 @@ class WebSocketManager:
             # Store drone-alert mapping
             self.drone_alerts[drone_id] = alert_id
             
-            # Create a properly serialized alert for broadcasting
-            # Use the original alert data but ensure it's properly serialized
-            broadcast_alert = serialize_datetime(alert_data.copy())
-            
-            # Add the alert_id to the broadcast data
-            broadcast_alert['id'] = str(alert_id)
-            
-            # Broadcast to all applications
+            # Broadcast the alert with original schema, just add alert_id once outside
             broadcast_message = {
-                "type": "new_alert",
-                "alert": broadcast_alert,
-                "alert_id": str(alert_id),  # Convert ObjectId to string
+                "type": "alert",
+                "alert_id": str(alert_id),
+                "data": serialize_datetime(alert_data.copy()),
                 "timestamp": datetime.utcnow().isoformat()
             }
             await self.broadcast_to_applications(broadcast_message)
             
-            logger.info(f"Alert {alert_id} from drone {drone_id} processed and broadcasted")
-            logger.info(f"Broadcast message: {json.dumps(broadcast_message, indent=2)}")
+            logger.info(f"Alert {alert_id} from drone {drone_id} stored and broadcasted")
             
         except Exception as e:
             logger.error(f"Error handling alert from drone {drone_id}: {e}")
@@ -257,20 +286,48 @@ class WebSocketManager:
     async def handle_alert_image_from_drone(self, drone_id: str, alert_image_data: Dict[str, Any]):
         """Handle alert image data from drone"""
         try:
-            # Create alert image in database
-            alert_image_id = await db_manager.create_alert_image(alert_image_data)
+            alert_image_id = None
             
-            # Broadcast to applications
+            # Check if entry with same 'name' exists in database
+            name = alert_image_data.get('name')
+            if name:
+                # Search for existing entry with same name
+                existing_entries = await db_manager.alert_images_collection.find({'name': name}).to_list(length=None)
+                
+                if existing_entries:
+                    # Update existing entry
+                    existing_id = existing_entries[0]['_id']
+                    await db_manager.alert_images_collection.update_one(
+                        {'_id': existing_id},
+                        {'$set': alert_image_data}
+                    )
+                    alert_image_id = str(existing_id)
+                    logger.info(f"Updated existing alert image with name '{name}' (ID: {alert_image_id})")
+                else:
+                    # Create new entry
+                    alert_image_id = await db_manager.create_alert_image(alert_image_data)
+                    logger.info(f"Created new alert image with name '{name}' (ID: {alert_image_id})")
+            else:
+                # No name provided, just create new entry
+                alert_image_id = await db_manager.create_alert_image(alert_image_data)
+                logger.info(f"Created new alert image without name (ID: {alert_image_id})")
+            
+            # Broadcast to ALL clients (both applications and drones) with original schema
             broadcast_message = {
-                "type": "alert_image_received",
-                "alert_image_id": alert_image_id,
-                "alert_image": serialize_datetime(alert_image_data),
-                "drone_id": drone_id,
+                "type": "alert_image",
+                "data": serialize_datetime(alert_image_data.copy()),
                 "timestamp": datetime.utcnow().isoformat()
             }
+            
+            # Broadcast to applications
             await self.broadcast_to_applications(broadcast_message)
             
-            logger.info(f"Alert image {alert_image_id} from drone {drone_id} processed and broadcasted")
+            # Broadcast to all drones (except sender)
+            for other_drone_id in list(self.drone_connections.keys()):
+                if other_drone_id != drone_id:  # Don't send back to sender   #THINK LATER
+                    await self.send_personal_message(other_drone_id, broadcast_message)
+            
+            logger.info(f"Alert image from drone {drone_id} processed and broadcasted to all clients")
             
         except Exception as e:
             logger.error(f"Error handling alert image from drone {drone_id}: {e}")
@@ -279,33 +336,18 @@ class WebSocketManager:
     async def handle_alert_image_from_application(self, app_id: str, alert_image_data: Dict[str, Any]):
         """Handle alert image data from application"""
         try:
-            # Create alert image in database
+            # Store alert image in database as-is
             alert_image_id = await db_manager.create_alert_image(alert_image_data)
             
-            # Broadcast to other applications
+            # Broadcast to applications with original schema - no modifications
             broadcast_message = {
-                "type": "alert_image_received",
-                "alert_image_id": alert_image_id,
-                "alert_image": serialize_datetime(alert_image_data),
-                "app_id": app_id,
+                "type": "alert_image",
+                "data": serialize_datetime(alert_image_data.copy()),
                 "timestamp": datetime.utcnow().isoformat()
             }
             await self.broadcast_to_applications(broadcast_message)
             
-            # Forward to drones if specified
-            drone_id = alert_image_data.get('drone_id')
-            if drone_id and drone_id != "No Drone":
-                drone_message = {
-                    "type": "alert_image",
-                    "alert_image_id": alert_image_id,
-                    "alert_image": serialize_datetime(alert_image_data),
-                    "app_id": app_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                await self.send_to_drone(drone_id, drone_message)
-                logger.info(f"Alert image {alert_image_id} forwarded to drone {drone_id}")
-            
-            logger.info(f"Alert image {alert_image_id} from application {app_id} processed and broadcasted")
+            logger.info(f"Alert image {alert_image_id} from application {app_id} stored and broadcasted")
             
         except Exception as e:
             logger.error(f"Error handling alert image from application {app_id}: {e}")
